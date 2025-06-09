@@ -279,20 +279,19 @@ def main():
     else:
         output_dir = os.path.join(script_dir, "scryfall_singles")
     os.makedirs(output_dir, exist_ok=True)
-    
     print(f"\nFound {len(cards)} cards. Downloading images to:\n{output_dir}\n")
+    print(cards)
     
     # Download images
     total_downloaded = 0
     for i, card in enumerate(cards):
         collector_number = card.get('collector_number', '')
-        card_id = card.get('id', '')[:8]
         
         primary_name = card.get('name', f"card_{i+1}")
         print(f"\nProcessing {i+1}/{len(cards)}: {primary_name}")
         
         # Handle double-faced cards
-        if 'card_faces' in card:
+        if 'card_faces' in card and card.get('layout') not in ('split', 'flip'):
             for face_index, face in enumerate(card['card_faces']):
                 if 'image_uris' in face and image_size in face['image_uris']:
                     img_url = face['image_uris'][image_size]
@@ -301,7 +300,7 @@ def main():
                     display_name = get_display_name(card, face)
                     face_type = "front" if face_index == 0 else "back"
                     
-                    base_name = f"{collector_number}_{sanitize_filename(display_name)}_{face_type}_{card_id}"
+                    base_name = f"{collector_number}_{sanitize_filename(display_name)}_{face_type}"
                     filename = f"{base_name}.{ext}"
                     filepath = os.path.join(output_dir, filename)
                     
@@ -315,7 +314,7 @@ def main():
             
             display_name = get_display_name(card)
             
-            base_name = f"{collector_number}_{sanitize_filename(display_name)}_{card_id}"
+            base_name = f"{collector_number}_{sanitize_filename(display_name)}"
             filename = f"{base_name}.{ext}"
             filepath = os.path.join(output_dir, filename)
             
