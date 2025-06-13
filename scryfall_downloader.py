@@ -1,332 +1,411 @@
 import os
 import sys
+import requests
 import time
-import json
-import urllib.request
-import urllib.error
-import math
 import re
-from urllib.parse import quote, urlparse
+import tkinter
+from tkinter import filedialog
+from PIL import Image, ImageOps
+from io import BytesIO
+from urllib.parse import quote_plus
+import traceback  # <<< ADDED: To print detailed error information
 
-def get_script_dir():
-    if getattr(sys, 'frozen', False):  # Running as compiled executable
-        return os.path.dirname(sys.executable)
-    else:  # Running as standard Python script
-        return os.path.dirname(os.path.abspath(__file__))
-    
+# Base URL for APIs
+SCRYFALL_API_BASE_URL = "https://api.scryfall.com"
+
+# Delay between API requests in seconds to respect Scryfall's rate limit (100ms)
+REQUEST_DELAY = 0.1
+
+# --- Constants for Physical Dimensions ---
+CARD_WIDTH_INCHES = 2.5
+CARD_HEIGHT_INCHES = 3.5
+BORDER_INCHES = 0.125
+
 def sanitize_filename(name):
-    # Convert to ASCII-safe filename with reasonable character limits
-    clean = name.encode('ascii', 'ignore').decode('ascii')
-    for c in ':/\\|?*"<>':
-        clean = clean.replace(c, '_')
-    clean = '_'.join(filter(None, clean.split('_')))
-    return clean[:180]
+    """Removes characters that are invalid for file names."""
+    name = name.replace('//', '-')
+    return re.sub(r'[\\/*?:"<>|]', "", name)
 
-def get_extension(url):
-    # Extract file extension from URL
-    return url.split('.')[-1].split('?')[0].lower()
+def add_border(image, border_size, color_choice):
+    """Adds a border to a given Pillow image object."""
+    if color_choice == 'transparent':
+        color = (0, 0, 0, 0)
+    elif color_choice == 'white':
+        color = (255, 255, 255)
+    else:  # black
+        color = (0, 0, 0)
 
-def download_image(url, filepath, border_type=None):
-    # Download an image with error handling
-    # Optionally add different types of borders
+    return ImageOps.expand(image, border=border_size, fill=color)
+
+def get_card_data_from_url(card_url):
+    """Extracts set code and card number from a Scryfall web URL and fetches card data."""
+    match = re.search(r'scryfall.com/card/([^/]+)/([^/]+)', card_url)
+    if not match:
+        print("  Invalid Scryfall card URL format.")
+        return None
+    set_code, collector_number = match.groups()
+    api_url = f"{SCRYFALL_API_BASE_URL}/cards/{set_code}/{collector_number}"
     try:
-        with urllib.request.urlopen(url) as response:
-            if response.status == 200:
-                img_data = response.read()
-                
-                # Save original image
-                with open(filepath, 'wb') as f:
-                    f.write(img_data)
-                
-                # Add border if requested
-                if border_type and border_type != "none":
-                    try:
-                        from PIL import Image, ImageOps
-                        import io
-                        
-                        # Open image from memory
-                        img = Image.open(io.BytesIO(img_data))
-                        width, height = img.size
-                        
-                        # Calculate DPI based on standard Magic card size (2.5 x 3.5 inches)
-                        dpi_x = width / 2.5
-                        dpi_y = height / 3.5
-                        dpi = (dpi_x + dpi_y) / 2
-                        
-                        # Calculate border width in pixels (1/8 inch)
-                        border_width = math.ceil(dpi / 8)
-                        
-                        # Handle different border types
-                        if border_type == "colorless":
-                            # Convert to RGBA if not already
-                            if img.mode != 'RGBA':
-                                img = img.convert('RGBA')
-                            
-                            # Create new transparent image with border space
-                            new_width = width + 2 * border_width
-                            new_height = height + 2 * border_width
-                            new_img = Image.new('RGBA', (new_width, new_height), (0, 0, 0, 0))
-                            
-                            # Paste original in center
-                            new_img.paste(img, (border_width, border_width))
-                            
-                            bordered_img = new_img
-                            border_desc = "transparent"
-                        elif border_type in ["black", "white"]:
-                            # For black/white borders, replace any existing transparency with border color
-                            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                                # Create new background with border color
-                                border_color = (0, 0, 0) if border_type == "black" else (255, 255, 255)
-                                background = Image.new('RGB', img.size, border_color)
-                                
-                                # Convert to RGBA if needed
-                                if img.mode != 'RGBA':
-                                    img = img.convert('RGBA')
-                                
-                                # Paste image onto background using alpha channel as mask
-                                background.paste(img, mask=img.split()[3] if img.mode == 'RGBA' else None)
-                                img = background
-                            
-                            # Add border expansion
-                            border_color = (0, 0, 0) if border_type == "black" else (255, 255, 255)
-                            bordered_img = ImageOps.expand(
-                                img, 
-                                border=border_width, 
-                                fill=border_color
-                            )
-                            border_desc = f"solid {border_type}"
-                        
-                        # Preserve original format if possible
-                        original_format = img.format
-                        
-                        # Save with border
-                        bordered_img.save(filepath, format=original_format if original_format != 'GIF' else 'PNG')
-                        print(f"  Added {border_width}px {border_desc} border")
-                        return True
-                    except ImportError:
-                        print("  Pillow library not installed. Borders require Pillow.")
-                        print("  Install with: pip install Pillow")
-                        print("  Saving without border")
-                        return True
-                    except Exception as e:
-                        print(f"  Error adding border: {e}")
-                        print("  Saving without border")
-                        return True
-                return True
-            else:
-                print(f"  HTTP Error {response.status}: {url}")
-                return False
-    except urllib.error.URLError as e:
-        print(f"  URL Error: {str(e)}")
-    except Exception as e:
-        print(f"  Error downloading {filepath}: {str(e)}")
-    return False
+        print(f"Fetching card data from: {api_url}")
+        time.sleep(REQUEST_DELAY)
+        response = requests.get(api_url)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"  Error fetching card data: {e}")
+        return None
 
-def get_all_cards(set_code):
-    # Retrieve all cards for a given set with pagination handling
-    cards = []
-    url = f"https://api.scryfall.com/cards/search?order=set&q=e%3A{quote(set_code)}&unique=prints"
+def process_card(card_data, image_size, download_dir, add_border_flag, border_color):
+    """Processes a single card's JSON data to download its image(s)."""
+    if not card_data:
+        return
+
+    image_format = 'png' if image_size == 'png' or border_color == 'transparent' else 'jpg'
     
-    while url:
+    layout = card_data.get('layout', 'normal')
+    card_name = sanitize_filename(card_data.get('name', 'UnknownCard'))
+    set_code = card_data.get('set', 'unknown')
+    collector_number = card_data.get('collector_number', '0')
+    flavor_name = sanitize_filename(card_data.get('flavor_name', ''))
+
+    print(f"\nProcessing card: {card_name} ({set_code.upper()} #{collector_number})")
+
+    def download_and_save(url, file_path, is_standard_size):
+        """Nested helper to download, process, and save an image."""
         try:
-            with urllib.request.urlopen(url) as response:
-                if response.status != 200:
-                    print(f"API Error: HTTP {response.status}")
-                    break
-                    
-                data = json.loads(response.read().decode('utf-8'))
-                cards.extend(data['data'])
-                
-                if data['has_more']:
-                    url = data['next_page']
-                    time.sleep(0.1)
-                else:
-                    url = None
-        except urllib.error.URLError as e:
-            print(f"API Connection Error: {str(e)}")
-            break
-        except json.JSONDecodeError as e:
-            print(f"JSON Parsing Error: {str(e)}")
-            break
-    
-    return cards
+            response = requests.get(url)
+            response.raise_for_status()
+            img = Image.open(BytesIO(response.content))
 
-def get_card_from_url(card_url):
-    # Retrieve card data from a Scryfall URL
-    try:
-        # Extract card ID from URL
-        parsed = urlparse(card_url)
-        path_parts = parsed.path.split('/')
-        
-        # Pattern 1: /cards/:set/:number/:name
-        # Pattern 2: /card/:set/:number/:id/:name
-        if len(path_parts) >= 4 and path_parts[1] in ['card', 'cards']:
-            set_code = path_parts[2]
-            collector_number = path_parts[3]
+            if add_border_flag:
+                if is_standard_size:
+                    pixel_width, _ = img.size
+                    effective_dpi = pixel_width / CARD_WIDTH_INCHES
+                    border_pixels = round(effective_dpi * BORDER_INCHES)
+                    img = add_border(img, border_pixels, border_color)
+                    print(f"    Applied {border_pixels}px border based on calculated DPI.")
+
+            if image_format == 'jpg' and img.mode == 'RGBA':
+                img = img.convert('RGB')
             
-            # Handle URLs with language codes
-            if re.match(r'^[a-z]{2}$', collector_number) and len(path_parts) > 4:
-                collector_number = path_parts[4]
-            
-            # Get card from Scryfall API
-            api_url = f"https://api.scryfall.com/cards/{set_code}/{collector_number}"
-            with urllib.request.urlopen(api_url) as response:
-                if response.status == 200:
-                    card_data = json.loads(response.read().decode('utf-8'))
-                    return [card_data]
-                else:
-                    print(f"API Error: HTTP {response.status} for {api_url}")
+            img.save(file_path)
+            print(f"  Successfully downloaded and saved: {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"  An error occurred processing {card_name}: {e}")
+
+    standard_sizes = ['small', 'normal', 'large', 'png', 'art_crop', 'border_crop']
+    is_standard_size = image_size in standard_sizes
+
+    single_image_layouts = [
+        'normal', 'split', 'flip', 'leveler', 'class', 'case', 'saga',
+        'adventure', 'mutate', 'prototype', 'planar', 'scheme', 'vanguard',
+        'token', 'emblem', 'augment', 'host'
+    ]
+    double_image_layouts = [
+        'transform', 'modal_dfc', 'double_faced_token', 'art_series', 'reversible_card'
+    ]
+
+    if layout in single_image_layouts:
+        if 'image_uris' in card_data and image_size in card_data['image_uris']:
+            image_url = card_data['image_uris'][image_size]
+            base_name = f"{set_code}-{collector_number}-{flavor_name}-{card_name}" if flavor_name else f"{set_code}-{collector_number}-{card_name}"
+            file_name = f"{base_name}.{image_format}"
+            file_path = os.path.join(download_dir, file_name)
+            download_and_save(image_url, file_path, is_standard_size)
         else:
-            print("Invalid Scryfall URL format")
-    except Exception as e:
-        print(f"Error retrieving card from URL: {str(e)}")
-    
-    return None
+            print(f"  Could not find image URI for size '{image_size}' for {card_name}.")
 
-def get_display_name(card_data, face_data=None):
-    # Get the best display name for a card, prioritizing alternate art names
-    if face_data:
-        if 'flavor_name' in face_data and face_data['flavor_name']:
-            return face_data['flavor_name']
-        if 'printed_name' in face_data and face_data['printed_name']:
-            return face_data['printed_name']
-        if 'name' in face_data and face_data['name']:
-            return face_data['name']
-    
-    if 'flavor_name' in card_data and card_data['flavor_name']:
-        return card_data['flavor_name']
-    if 'printed_name' in card_data and card_data['printed_name']:
-        return card_data['printed_name']
-    
-    return card_data.get('name', 'Unnamed Card')
+    elif layout in double_image_layouts:
+        if 'card_faces' in card_data:
+            for i, face in enumerate(card_data['card_faces']):
+                if 'image_uris' in face and image_size in face['image_uris']:
+                    face_name = sanitize_filename(face.get('name', f"face{i+1}"))
+                    image_url = face['image_uris'][image_size]
+                    file_name = f"{set_code}-{collector_number}-{face_name}.{image_format}"
+                    file_path = os.path.join(download_dir, file_name)
+                    download_and_save(image_url, file_path, is_standard_size)
+                else:
+                    print(f"  Could not find image URI for size '{image_size}' for face {i+1} of {card_name}.")
+        else:
+            print(f"  Layout is '{layout}' but no 'card_faces' data found for {card_name}.")
+
+    elif layout == 'meld':
+        if 'all_parts' in card_data:
+            print(f"  Processing meld card. It has {len(card_data['all_parts'])} parts.")
+            for part in card_data['all_parts']:
+                component_type = part.get('component')
+                part_name = sanitize_filename(part.get('name', 'UnknownPart'))
+                if component_type in ['meld_part', 'meld_result']:
+                    part_data = None
+                    try:
+                        api_uri = part['uri']
+                        time.sleep(REQUEST_DELAY)
+                        response = requests.get(api_uri)
+                        response.raise_for_status()
+                        part_data = response.json()
+                    except requests.exceptions.RequestException as e:
+                        print(f"    Error fetching meld part data for {part_name}: {e}")
+                        continue
+
+                    if not part_data:
+                        print(f"    Could not get data for meld part: {part_name}")
+                        continue
+
+                    part_set = part_data.get('set', 'unknown')
+                    part_number = part_data.get('collector_number', '0')
+
+                    if 'image_uris' in part_data and image_size in part_data['image_uris']:
+                        image_url = part_data['image_uris'][image_size]
+
+                        if component_type == 'meld_result':
+                            print(f"    Downloading and splitting meld result: {part_name}")
+                            try:
+                                response = requests.get(image_url)
+                                response.raise_for_status()
+                                img = Image.open(BytesIO(response.content))
+                                
+                                width, height = img.size
+                                top_half = img.crop((0, 0, width, height // 2))
+                                bottom_half = img.crop((0, height // 2, width, height))
+
+                                top_half = top_half.transpose(Image.Transpose.ROTATE_90)
+                                bottom_half = bottom_half.transpose(Image.Transpose.ROTATE_90)
+                                
+                                if add_border_flag:
+                                    pixel_width, _ = top_half.size
+                                    effective_dpi = pixel_width / CARD_HEIGHT_INCHES
+                                    border_pixels = round(effective_dpi * BORDER_INCHES)
+                                    print(f"    Applying {border_pixels}px border to meld parts.")
+                                    
+                                    top_half = add_border(top_half, border_pixels, border_color)
+                                    bottom_half = add_border(bottom_half, border_pixels, border_color)
+                                
+                                if image_format == 'jpg':
+                                    if top_half.mode == 'RGBA':
+                                        top_half = top_half.convert('RGB')
+                                    if bottom_half.mode == 'RGBA':
+                                        bottom_half = bottom_half.convert('RGB')
+
+                                top_filename = f"{part_set}-{part_number}-{part_name}-top.{image_format}"
+                                bottom_filename = f"{part_set}-{part_number}-{part_name}-bottom.{image_format}"
+
+                                top_half.save(os.path.join(download_dir, top_filename))
+                                bottom_half.save(os.path.join(download_dir, bottom_filename))
+                                print(f"      Saved: {top_filename} and {bottom_filename}")
+
+                            except Exception as e:
+                                print(f"    Error processing meld result image for {part_name}: {e}")
+                        else:
+                            file_name = f"{part_set}-{part_number}-{part_name}.{image_format}"
+                            file_path = os.path.join(download_dir, file_name)
+                            download_and_save(image_url, file_path, True)
+                    else:
+                        print(f"    Could not find image URI for size '{image_size}' for meld part: {part_name}")
+        else:
+            print(f"  Layout is 'meld' but no 'all_parts' data found for {card_name}.")
+    else:
+        print(f"  Unhandled card layout: '{layout}' for card {card_name}. Skipping.")
 
 def main():
-    # User inputs
-    print("Download options:")
-    print("1. Download an entire set")
-    print("2. Download a single card from URL")
-    choice = input("Select download option (1 or 2): ").strip()
-    
-    cards = []
-    set_code = "singles"
-    
-    if choice == "1":
-        # Set download mode
-        set_code = input("Enter set code (e.g., 'FCA', 'FIC'): ").strip().lower()
-        cards = get_all_cards(set_code)
-        
-    elif choice == "2":
-        # Single card download mode
-        card_url = input("Enter Scryfall card URL: ").strip()
-        cards = get_card_from_url(card_url)
-        if cards:
-            set_code = cards[0].get('set', 'singles')
-        else:
-            print("Failed to retrieve card from URL")
-            return
+    """Main function to run the script."""
+    print("=========================================")
+    print(" Scryfall Magic: The Gathering Downloader")
+    print("=========================================")
+
+    if getattr(sys, 'frozen', False):
+        script_dir = os.path.dirname(sys.executable)
     else:
-        print("Invalid choice")
-        return
-    
-    if not cards:
-        print("No cards found.")
-        return
-    
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    download_mode = ''
+    print("\nSelect download mode:")
+    print("[1] Download a full Set")
+    print("[2] Download a single card by URL")
+    print("[3] Download from Pasted Decklist")
+    while True:
+        choice = input("Enter your choice (1, 2, or 3): ").strip()
+        if choice in ['1', '2', '3']:
+            download_mode = choice
+            break
+        print("Invalid choice. Please enter 1, 2, or 3.")
+
+    image_sizes = ['small', 'normal', 'large', 'png', 'art_crop', 'border_crop']
     print("\nAvailable image sizes:")
-    sizes = ['small', 'normal', 'large', 'png', 'art_crop', 'border_crop']
-    for i, size in enumerate(sizes, 1):
-        print(f"{i}. {size}")
+    for i, size in enumerate(image_sizes):
+        print(f"[{i+1}] {size}")
     
-    try:
-        size_choice = int(input("\nSelect image size (1-6): ").strip())
-        if 1 <= size_choice <= 6:
-            image_size = sizes[size_choice - 1]
-        else:
-            print("Invalid selection. Using 'normal'.")
-            image_size = 'normal'
-    except ValueError:
-        print("Invalid input. Using 'normal'.")
-        image_size = 'normal'
+    image_size_choice = ''
+    while True:
+        try:
+            choice = input(f"Enter desired image size (1-{len(image_sizes)}): ").strip()
+            choice_index = int(choice) - 1
+            if 0 <= choice_index < len(image_sizes):
+                image_size_choice = image_sizes[choice_index]
+                break
+            else:
+                print("Invalid number. Please choose from the list.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+    add_border_flag = False
+    border_color = ''
+    print("\nAdd a 1/8 inch border for print bleed?")
+    print("[1] Yes")
+    print("[2] No")
+    while True:
+        choice = input("Enter your choice (1 or 2): ").strip()
+        if choice == '1':
+            add_border_flag = True
+            break
+        elif choice == '2':
+            add_border_flag = False
+            break
+        print("Invalid choice. Please enter 1 or 2.")
+
+    if add_border_flag:
+        print("\nEnter border color:")
+        print("[1] Black")
+        print("[2] White")
+        print("[3] Transparent")
+        color_map = {'1': 'black', '2': 'white', '3': 'transparent'}
+        while True:
+            choice = input("Enter your choice (1, 2, or 3): ").strip()
+            if choice in color_map:
+                border_color = color_map[choice]
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
+        print(f"A 1/8 inch ({border_color}) border will be added. Pixel size is calculated per-image.")
+
+    cards_to_process = []
+    folder_name = ""
+
+    if download_mode == '1':
+        set_code = input("\nEnter the set letter tag (e.g., BRO, DSK): ").strip().lower()
+        folder_name = set_code
+        search_url = f"{SCRYFALL_API_BASE_URL}/cards/search?q=set%3A{set_code}&unique=cards"
+        print(f"\nFetching card list for set: {set_code.upper()}...")
+        while search_url:
+            try:
+                time.sleep(REQUEST_DELAY)
+                response = requests.get(search_url)
+                response.raise_for_status()
+                json_data = response.json()
+                cards_to_process.extend(json_data.get('data', []))
+                if json_data.get('has_more'):
+                    search_url = json_data.get('next_page')
+                    print("  Found more pages, fetching next...")
+                else:
+                    search_url = None
+            except requests.exceptions.RequestException as e:
+                print(f"Error fetching set data: {e}")
+                print("Please check if the set code is correct.")
+                search_url = None
+
+    elif download_mode == '2':
+        card_url = input("\nPaste the full Scryfall card URL: ").strip()
+        folder_name = "singles"
+        card_data = get_card_data_from_url(card_url)
+        if card_data:
+            cards_to_process.append(card_data)
+
+    elif download_mode == '3':
+        folder_name = sanitize_filename(input("\nEnter a name for the deck folder: ").strip())
+        if not folder_name:
+            folder_name = "pasted-deck"
+        print("\nPaste your decklist below (view README for format). Enter a blank line to finish.")
+        deck_lines = []
+        while True:
+            line = input()
+            if not line:
+                break
+            deck_lines.append(line)
+        line_regex = re.compile(r"^\s*(\d+)\s+(.+?)(?:\s+\((\w{3,5})\)\s+([\w\d-]+))?\s*$")
+        processed_cards = set()
+        print(f"\nParsing decklist and fetching from Scryfall...")
+        for line in deck_lines:
+            match = line_regex.match(line)
+            if not match:
+                print(f"Warning: Could not parse line '{line}'. Skipping.")
+                continue
+            _, name, set_code, number = match.groups()
+            name = name.strip()
+            card_identifier = f"{set_code.lower()}-{number}" if set_code and number else name
+            if card_identifier in processed_cards:
+                continue
+            api_url = f"{SCRYFALL_API_BASE_URL}/cards/{set_code.lower()}/{number}" if set_code and number else f"{SCRYFALL_API_BASE_URL}/cards/named?exact={quote_plus(name)}"
+            try:
+                time.sleep(REQUEST_DELAY)
+                response = requests.get(api_url)
+                response.raise_for_status()
+                cards_to_process.append(response.json())
+                processed_cards.add(card_identifier)
+                print(f"  Found: {name}")
+            except requests.exceptions.RequestException as e:
+                print(f"  Error finding '{name}': {e}")
     
-    # Border options
-    print("\nBorder options:")
-    print("1. No border")
-    print("2. Solid black border")
-    print("3. Solid white border")
-    print("4. Colorless border (transparent)")
+    if not cards_to_process:
+        print("\nNo cards to download. Exiting.")
+        return
+
+    print("\nA file dialog will now open. Please select where to save the output folder.")
+    root = tkinter.Tk()
+    root.attributes('-topmost', True) # Force the dialog to the front
+    root.withdraw()  # Hide the root window
+    base_dir = filedialog.askdirectory(
+        parent=root,
+        initialdir=script_dir,
+        title="Please select a directory to save your card folder in"
+    )
+    root.destroy() # Clean up the root window after selection
+
+    if not base_dir:
+        print("\nNo directory selected. Exiting program.")
+        return
+
+    download_dir = os.path.join(base_dir, folder_name)
+
+    if not os.path.exists(download_dir):
+        print(f"\nCreating directory: {download_dir}")
+        os.makedirs(download_dir)
+
+    print(f"\nStarting download of {len(cards_to_process)} card(s) as '{image_size_choice}' images...")
     
-    border_choice = input("Select border option (1-4): ").strip()
-    border_type = None
-    
-    if border_choice == "1":
-        print("No border will be added")
-    elif border_choice == "2":
-        border_type = "black"
-        print("Adding solid black bleed border")
-    elif border_choice == "3":
-        border_type = "white"
-        print("Adding solid white bleed border")
-    elif border_choice == "4":
-        border_type = "colorless"
-        print("Adding transparent colorless border")
-    else:
-        print("Invalid selection. No border will be added")
-    
-    # Create output directory relative to script location
-    script_dir = get_script_dir()
-    if choice == "1":
-        output_dir = os.path.join(script_dir, f"scryfall_{set_code}")
-    else:
-        output_dir = os.path.join(script_dir, "scryfall_singles")
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"\nFound {len(cards)} cards. Downloading images to:\n{output_dir}\n")
-    print(cards)
-    
-    # Download images
-    total_downloaded = 0
-    for i, card in enumerate(cards):
-        collector_number = card.get('collector_number', '')
-        
-        primary_name = card.get('name', f"card_{i+1}")
-        print(f"\nProcessing {i+1}/{len(cards)}: {primary_name}")
-        
-        # Handle double-faced cards
-        if 'card_faces' in card and card.get('layout') not in ('split', 'flip'):
-            for face_index, face in enumerate(card['card_faces']):
-                if 'image_uris' in face and image_size in face['image_uris']:
-                    img_url = face['image_uris'][image_size]
-                    ext = get_extension(img_url)
-                    
-                    display_name = get_display_name(card, face)
-                    face_type = "front" if face_index == 0 else "back"
-                    
-                    base_name = f"{collector_number}_{sanitize_filename(display_name)}_{face_type}"
-                    filename = f"{base_name}.{ext}"
-                    filepath = os.path.join(output_dir, filename)
-                    
-                    if download_image(img_url, filepath, border_type):
-                        print(f"  Downloaded: {filename}")
-                        total_downloaded += 1
-        # Handle single-faced cards
-        elif 'image_uris' in card and image_size in card['image_uris']:
-            img_url = card['image_uris'][image_size]
-            ext = get_extension(img_url)
-            
-            display_name = get_display_name(card)
-            
-            base_name = f"{collector_number}_{sanitize_filename(display_name)}"
-            filename = f"{base_name}.{ext}"
-            filepath = os.path.join(output_dir, filename)
-            
-            if download_image(img_url, filepath, border_type):
-                print(f"  Downloaded: {filename}")
-                total_downloaded += 1
-        
-        # Respect API rate limits
-        if i < len(cards) - 1:
-            time.sleep(0.1)
-    
-    print(f"\nDownload complete! {total_downloaded} images saved to '{output_dir}'")
+    for card in cards_to_process:
+        process_card(card, image_size_choice, download_dir, add_border_flag, border_color)
+        time.sleep(REQUEST_DELAY)
+
+    print("\n=========================================")
+    print("Download process finished!")
+    print("=========================================")
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+
+        except Exception as e:
+            print("\n\n--- AN UNEXPECTED ERROR OCCURRED ---")
+            print("The program encountered a fatal error and had to stop.")
+            print("----------------- ERROR REPORT -----------------")
+            
+            traceback.print_exc()
+            
+            print("----------------- END OF REPORT ----------------")
+            input("\nPress ENTER to acknowledge and continue...")
+
+        while True:
+            restart_choice = input("\nWould you like to restart the program? (y/n): ").lower().strip()
+            if restart_choice in ["y", "yes", "n", "no"]:
+                break
+            else:
+                print("Invalid input. Please enter 'y' for yes or 'n' for no.")
+
+        if restart_choice in ["n", "no"]:
+            break
+        
+        print("\nRestarting program...")
+        time.sleep(1)
+
+    print("\nClosing program. Goodbye!")
+    time.sleep(2)
